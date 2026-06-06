@@ -35,7 +35,7 @@ Citizens spend hours navigating fragmented `.gov.in` portals, IRCTC, and travel 
 └────────────────────────────┬────────────────────────────────────┘
                              │
               ┌──────────────┴──────────────┐
-              │     travel_runner.py       │
+              │     travel_runner.py        │
               └──────────────┬──────────────┘
                              │
          ┌───────────────────┼───────────────────┐
