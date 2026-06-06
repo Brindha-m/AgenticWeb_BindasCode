@@ -1,5 +1,5 @@
 """
-app.py — Agentic Web Streamlit UI
+app.py — Made It Streamlit UI
 ----------------------------------
 Main entry point. Run with: streamlit run app.py
 
@@ -7,9 +7,6 @@ Changes from v1:
   - Added IRCTC quick-launch card on home page
   - API key can be entered inline and saved to .env
   - Headless toggle now shows warning for IRCTC
-  - Agent status bar shows engine badge
-  - Step cards show vision-click actions correctly
-  - Footer updated with page links
 """
 
 import asyncio
@@ -25,6 +22,7 @@ from dotenv import load_dotenv
 
 from agent import travel_runner
 from ui.agent_mode import build_scripted_config, render_mode_selector, validate_ai_api_or_stop
+from ui.streamlit_nav import PROJECT_SUBTITLE, PROJECT_TAGLINE, PROJECT_TITLE
 from ui.gov_prompts import (
     GOV_QUICK_LAUNCH,
     build_agent_task,
@@ -68,8 +66,8 @@ def page_link(page: str, *, label: str) -> None:
 # ─── PAGE CONFIG ─────────────────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="Agentic Web",
-    page_icon="🤖",
+    page_title=PROJECT_TITLE,
+    page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -177,8 +175,9 @@ init_state()
 # ─── SIDEBAR ─────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.markdown("## 🤖 Agentic Web")
-    st.markdown("*AI-powered browser automation*")
+    st.markdown(f"## 🎯 {PROJECT_TITLE}")
+    st.markdown(f"*{PROJECT_TAGLINE}*")
+    st.caption(PROJECT_SUBTITLE)
     st.divider()
 
     st.markdown("### 🧭 Travel")
@@ -186,7 +185,6 @@ with st.sidebar:
     page_link("pages/2_irctc.py", label="🚂 IRCTC Railways")
     page_link("pages/3_bus.py", label="🚌 Bus Travel Booking")
     page_link("pages/4_flights.py", label="✈️ Flights")
-    page_link("pages/5_state_transport.py", label="🛣️ State Transport")
     page_link("pages/6_government.py", label="🏛️ Government Services")
     st.divider()
     st.markdown("### 🛠 Tools")
@@ -255,18 +253,16 @@ with st.sidebar:
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 
-st.markdown("# 🌐 Agentic Web")
-st.markdown(
-    "Describe any web task — the AI agent navigates, clicks, fills forms, "
-    "and completes it step by step. For IRCTC booking use the dedicated page."
-)
+st.markdown(f"# 🎯 {PROJECT_TITLE}")
+st.markdown(f"**{PROJECT_TAGLINE}**")
+st.markdown(PROJECT_SUBTITLE)
 
 # ── QUICK LAUNCH (8 government services) ───────────────────────────────────
 
 st.markdown("### 🚀 Quick launch")
 st.caption(
     "Click a card to open a **dedicated agent page** (live log + browser view + OTP/CAPTCHA help). "
-    "IRCTC opens Railways; other services open Government Services."
+    "IRCTC opens Railways; other services (including **State Transport**) open Government Services."
 )
 
 

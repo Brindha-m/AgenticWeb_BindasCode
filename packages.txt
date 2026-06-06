@@ -1,0 +1,2 @@
+# Streamlit Cloud: Playwright needs system deps — use scripted UI demo only on cloud.
+# For full automation, run locally or on a VM with Chrome installed.
