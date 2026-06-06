@@ -58,7 +58,7 @@ Citizens spend hours navigating fragmented `.gov.in` portals, IRCTC, and travel 
          └────────┬─────────┘
                   ▼
          ┌─────────────────┐
-         │  Chrome Browser  │  ← Human-in-the-loop (CAPTCHA, OTP, payment)
+         │  Chrome Browser │  ← Human-in-the-loop (CAPTCHA, OTP, payment)
          └─────────────────┘
 ```
 
