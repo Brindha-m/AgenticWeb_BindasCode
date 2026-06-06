@@ -1,17 +1,10 @@
-# Made It — AI Browser Automation for India
+## Made It — AI Agentic Browser Automation
 
-**Say it once — we get it done.**
+> **From IRCTC and Tirupati to FASTag, dedicated agents for the services that matter the most. 🚀**
 
-From IRCTC and Tirupati to FASTag, dedicated agents for the services that matter the most. 🚀
-
-**Team Bindas Code** | Microsoft Hackathon Submission
-
-**Live demo:** [agenticweb-bindascode.streamlit.app](https://agenticweb-bindascode.streamlit.app/)  
-**GitHub:** [github.com/Brindha-m/AgenticWeb_BindasCode](https://github.com/Brindha-m/AgenticWeb_BindasCode)
+> **Team Bindas Code** | Microsoft Hackathon Submission
 
 **Made It** is an AI-powered browser automation platform that completes real-world tasks on Indian government portals, railways, buses, flights, and utility sites. Users describe what they need in plain English; intelligent agents navigate, fill forms, handle CAPTCHAs and OTPs with human-in-the-loop safety, and return structured results.
-
-**Hackathon write-up** (problem, objective, methodology, scope): see [`docs/PROJECT_WRITEUP.md`](docs/PROJECT_WRITEUP.md).
 
 ---
 
@@ -37,7 +30,7 @@ Citizens spend hours navigating fragmented `.gov.in` portals, IRCTC, and travel 
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Streamlit UI (app.py + pages/)                │
+│                    Streamlit UI (app.py + pages/)               │
 │   Home · IRCTC · Bus · Flights · Gov Services · CDP Inspector   │
 └────────────────────────────┬────────────────────────────────────┘
                              │
@@ -47,17 +40,17 @@ Citizens spend hours navigating fragmented `.gov.in` portals, IRCTC, and travel 
                              │
          ┌───────────────────┼───────────────────┐
          ▼                   ▼                   ▼
-  ┌─────────────┐    ┌──────────────┐    ┌─────────────────┐
-  │ Orchestrator│    │ scripted_    │    │ irctc_playwright│
-  │ observe→plan│    │ flows.py     │    │ (dedicated rail)│
-  │ →act→verify │    │ (no LLM)     │    └─────────────────┘
+  ┌─────────────┐    ┌──────────────┐    ┌───────────────────┐
+  │ Orchestrator│    │ scripted_    │    │ irctc_playwright  │
+  │ observe→plan│    │ flows.py     │    │ (dedicated rail)  │
+  │ →act→verify │    │ (no LLM)     │    └───────────────────┘
   └──────┬──────┘    └──────┬───────┘
          │                  │
          ▼                  ▼
-  ┌─────────────┐    ┌──────────────────────────┐
-  │ planner.py  │    │ playwright_engine.py     │
+  ┌─────────────┐    ┌───────────────────────────┐
+  │ planner.py  │    │ playwright_engine.py      │
   │ Claude/GPT  │    │ OR cdp_engine.py (raw CDP)│
-  └─────────────┘    └──────────────────────────┘
+  └─────────────┘    └───────────────────────────┘
          │                  │
          └────────┬─────────┘
                   ▼
@@ -157,11 +150,9 @@ See `requirements.txt`:
 
 **Judge access:** No app login required. Use **Scripted mode** on any service page. OTP/CAPTCHA appear in the yellow human-input panel when automating real portals locally.
 
-**Live URL:** [https://agenticweb-bindascode.streamlit.app/](https://agenticweb-bindascode.streamlit.app/)
+>  **Live URL:** [https://agenticweb-bindascode.streamlit.app/](https://agenticweb-bindascode.streamlit.app/)
 
-**Repository:** [https://github.com/Brindha-m/AgenticWeb_BindasCode](https://github.com/Brindha-m/AgenticWeb_BindasCode)
-
-**Demo video (optional):** _Add Loom/YouTube link showing IRCTC or India Post flow._
+>  **Demo video:** [https://youtu.be/IlBGhVNE2Ms](https://youtu.be/IlBGhVNE2Ms)
 
 ---
 
@@ -184,7 +175,7 @@ made-it/
 ├── pages/                 # Streamlit multipage routes
 ├── ui/                    # Shared components & gov prompts
 ├── scripts/               # CLI smoke tests
-└── docs/                  # Project deck PDF & submission notes
+└── docs/                  # Project deck PDF
 ```
 
 ---
@@ -193,9 +184,7 @@ made-it/
 
 | Name | Role |
 |------|------|
-| **Brindha Manickavasakan** | Team Lead · Architecture · AI agent & orchestration |
-| _Add teammates_ | _Frontend / Streamlit UI_ |
-| _Add teammates_ | _Playwright automation & gov integrations_ |
+| **Brindha Manickavasakan** | Team Lead 
 
 ---
 
