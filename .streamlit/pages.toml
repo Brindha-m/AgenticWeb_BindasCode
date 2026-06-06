@@ -1,0 +1,39 @@
+[[pages]]
+path = "app.py"
+name = "Home"
+icon = "🏠"
+
+[[pages]]
+path = "pages/2_irctc.py"
+name = "IRCTC Railways"
+icon = "🚂"
+
+[[pages]]
+path = "pages/3_bus.py"
+name = "Bus Travel Booking"
+icon = "🚌"
+
+[[pages]]
+path = "pages/4_flights.py"
+name = "Flights"
+icon = "✈️"
+
+[[pages]]
+path = "pages/6_government.py"
+name = "Government Services"
+icon = "🏛️"
+
+[[pages]]
+path = "pages/7_cdp_inspector.py"
+name = "CDP Inspector"
+icon = "🔌"
+
+[[pages]]
+path = "pages/8_compare.py"
+name = "Compare"
+icon = "⚖️"
+
+[[pages]]
+path = "pages/9_history.py"
+name = "History"
+icon = "📜"
