@@ -90,21 +90,16 @@ Action types the planner emits: `navigate`, `click`, `type`, `select`, `scroll`,
 ```bash
 git clone https://github.com/Brindha-m/AgenticWeb_BindasCode.git
 cd AgenticWeb_BindasCode
+
 python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # macOS/Linux
+.venv\Scripts\activate          
+
 pip install -r requirements.txt
+
 playwright install chromium
 ```
 
-### Configure
-
-```bash
-copy .env.example .env          # Windows
-# cp .env.example .env          # macOS/Linux
-```
-
-Edit `.env`:
+### Configure Edit `.env`:
 
 - **Scripted mode (no API key):** `DEFAULT_AGENT_MODE=scripted`
 - **AI mode:** set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` + `LLM_PROVIDER=openai`
