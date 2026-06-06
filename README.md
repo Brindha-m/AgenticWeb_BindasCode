@@ -16,6 +16,9 @@ Citizens spend hours navigating fragmented `.gov.in` portals, IRCTC, and travel 
 
 **Made It** combines **LLM planning** (Claude / OpenAI) with **Playwright** and optional **raw Chrome DevTools Protocol (CDP)** to observe pages, decide the next action, act in a real browser, and recover from failures. A **scripted mode** runs fixed Playwright flows with zero API cost for demos and production reliability.
 
+<img width="1870" height="1445" alt="03_solution" src="https://github.com/user-attachments/assets/8f7f5f9b-184b-4581-9762-a41d27334a3d" />
+
+
 ### Supported services
 
 | Category | Services |
