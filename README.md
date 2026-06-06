@@ -191,3 +191,9 @@ made-it/
 MIT — see repository for details.
 
 **Project deck:** `docs/BindasCode_AgenticWeb_ProjectDeck.pdf`
+
+---
+
+> ### "The day AI reliably books your IRCTC ticket.. is the day we can finally say —  AI has made it." And This is Made It.
+
+### "Thank you."
