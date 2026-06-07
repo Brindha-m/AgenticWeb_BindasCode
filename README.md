@@ -197,6 +197,6 @@ MIT — see repository for details.
 
 ---
 
-> ### "The day AI reliably books your IRCTC ticket.. is the day we can finally say —  AI has made it." And This is Made It.
+> #### "The day AI reliably books your IRCTC ticket.. is the day we can finally say —  AI has made it." And This is Made It.
 
-### "Thank you."
+#### "Thank you."
