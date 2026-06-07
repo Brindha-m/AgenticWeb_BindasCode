@@ -144,11 +144,12 @@ See `requirements.txt`:
 
 ## Deployment & live demo
 
+Recommned to run in local.
+
 | Option | Notes |
 |--------|-------|
-| **Local + ngrok** | Best for full Playwright demo: `ngrok http 8501` |
 | **Streamlit Cloud** | UI only — Playwright cannot launch Chrome in cloud sandbox |
-| **VM / Azure** | Run `streamlit run app.py --server.port 8501 --server.address 0.0.0.0` |
+
 
 **Judge access:** No app login required. Use **Scripted mode** on any service page. OTP/CAPTCHA appear in the yellow human-input panel when automating real portals locally.
 
