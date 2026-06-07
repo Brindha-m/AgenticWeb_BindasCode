@@ -1,11 +1,15 @@
+> ##### **Team Bindas Code** | Microsoft Hackathon Submission
+
 ## Made It — AI Agentic Browser Automation
 
 > **From IRCTC and Tirupati to FASTag, dedicated agents for the services that matter the most. 🚀**
 
-> **Team Bindas Code** | Microsoft Hackathon Submission
 
 **Made It** is an AI-powered browser automation platform that completes real-world tasks on Indian government portals, railways, buses, flights, and utility sites. Users describe what they need in plain English; intelligent agents navigate, fill forms, handle CAPTCHAs and OTPs with human-in-the-loop safety, and return structured results.
 
+>  **Live URL:** [https://agenticweb-bindascode.streamlit.app/](https://agenticweb-bindascode.streamlit.app/)
+
+>  **Demo video:** [https://youtu.be/IlBGhVNE2Ms](https://youtu.be/IlBGhVNE2Ms)
 ---
 
 ## Problem
@@ -148,9 +152,7 @@ See `requirements.txt`:
 
 **Judge access:** No app login required. Use **Scripted mode** on any service page. OTP/CAPTCHA appear in the yellow human-input panel when automating real portals locally.
 
->  **Live URL:** [https://agenticweb-bindascode.streamlit.app/](https://agenticweb-bindascode.streamlit.app/)
 
->  **Demo video:** [https://youtu.be/IlBGhVNE2Ms](https://youtu.be/IlBGhVNE2Ms)
 
 ---
 
