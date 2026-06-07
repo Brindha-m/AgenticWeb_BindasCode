@@ -144,7 +144,7 @@ See `requirements.txt`:
 
 ## Deployment & live demo
 
-Recommned to run in local.
+Recommended to run in local.
 
 | Option | Notes |
 |--------|-------|
