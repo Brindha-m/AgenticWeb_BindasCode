@@ -53,6 +53,10 @@ CLASS_TAB_TEXT = {
 }
 
 
+class IrctcSessionError(RuntimeError):
+    """IRCTC 'Sorry!!! Please Try again!!' page — booking must restart from search."""
+
+
 class IRCTCPlaywrightBot:
     IRCTC_URL = "https://www.irctc.co.in/nget/train-search"
 
@@ -149,7 +153,21 @@ class IRCTCPlaywrightBot:
             await self._step_select_train()
             self.steps_done.append("select_train")
 
-            await self._step_passengers()
+            try:
+                await self._step_passengers()
+            except IrctcSessionError as exc:
+                # 'Sorry!!! Please Try again!!' kills the booking flow but not
+                # the login session — restart once from the search page.
+                self._log(f"⚠ {exc}")
+                self._log("→ Restarting booking from train search (1 retry)...")
+                await self._anik_pause(3, 2)
+                await self.page.goto(
+                    self.IRCTC_URL, wait_until="domcontentloaded", timeout=60000
+                )
+                await self._dismiss_popup()
+                await self._step_search()
+                await self._step_select_train()
+                await self._step_passengers()
             self.steps_done.append("passengers")
 
             if self.config.stop_before_payment:
@@ -1043,6 +1061,11 @@ class IRCTCPlaywrightBot:
         )
         self._log(f"  → Booking phase: {phase}")
 
+        if phase == "error":
+            raise IrctcSessionError(
+                "IRCTC 'Sorry!!! Please Try again!!' page appeared after passenger step"
+            )
+
         if phase == "captcha":
             await self._handle_booking_captcha()
             phase = await self._wait_booking_phase_transition(
@@ -1290,6 +1313,12 @@ class IRCTCPlaywrightBot:
             body = (await self.page.inner_text("body"))[:4000].lower()
         except Exception:
             pass
+        if (
+            ("sorry" in body and "please try again" in body)
+            or "this error has occured" in body
+            or "this error has occurred" in body
+        ):
+            return "error"
         if "review booking" in body or "booking details" in body:
             return "review"
         if "credit" in body and "debit" in body and "irctc" in body:
@@ -1402,45 +1431,86 @@ class IRCTCPlaywrightBot:
                 ),
             ]
 
-        deadline = time.time() + (25 if step == "passenger" else 15)
+        deadline = time.time() + (45 if step == "passenger" else 15)
         last_err = ""
+        clicks = 0
+        # IRCTC shows 'Sorry!!! Please Try again!!' if Continue is clicked twice,
+        # so click at most twice, with a long transition wait in between.
+        max_clicks = 2
         while time.time() < deadline:
-            if await self._click_passenger_continue_js(pick=js_pick):
-                self._log(f"  → {step} Continue (JS)")
-                await self._anik_pause(3, 2)
-                if step == "passenger":
-                    new_phase = await self._wait_booking_phase_transition(
-                        after="passenger_continue", timeout=8
-                    )
-                    if new_phase != "passenger":
-                        return
-                else:
-                    return
+            phase = await self._detect_booking_phase()
+            if phase == "error":
+                raise IrctcSessionError(
+                    "IRCTC 'Sorry!!! Please Try again!!' page appeared "
+                    f"(at step '{step}')"
+                )
+            if step == "passenger" and phase in ("captcha", "review", "payment"):
+                return
+            if clicks >= max_clicks:
+                break
 
-            for loc in locator_chain:
-                try:
-                    count = await loc.count()
-                    if count == 0:
-                        continue
-                    btn = loc.last if step != "passenger" or count > 1 else loc.first
-                    if not await self._passenger_continue_enabled(btn):
-                        continue
-                    await btn.scroll_into_view_if_needed()
+            clicked = False
+            if await self._click_passenger_continue_js(pick=js_pick):
+                clicked = True
+                self._log(f"  → {step} Continue (JS)")
+            else:
+                for loc in locator_chain:
                     try:
-                        await btn.click(force=True, timeout=5000)
+                        count = await loc.count()
+                        if count == 0:
+                            continue
+                        btn = loc.last if step != "passenger" or count > 1 else loc.first
+                        if not await self._passenger_continue_enabled(btn):
+                            continue
+                        await btn.scroll_into_view_if_needed()
+                        try:
+                            await btn.click(force=True, timeout=5000)
+                        except Exception as exc:
+                            last_err = str(exc)
+                            await btn.evaluate("(el) => el.click()")
+                        clicked = True
+                        self._log(f"  → {step} Continue (#psgn-form)")
+                        break
                     except Exception as exc:
                         last_err = str(exc)
-                        await btn.evaluate("(el) => el.click()")
-                    self._log(f"  → {step} Continue (#psgn-form)")
-                    await self._anik_pause(3, 2)
-                    return
-                except Exception as exc:
-                    last_err = str(exc)
-                    continue
+                        continue
 
-            await asyncio.sleep(0.5)
+            if not clicked:
+                await asyncio.sleep(0.5)
+                continue
+
+            clicks += 1
+            await self._anik_pause(3, 2)
+            if step != "passenger":
+                return
+
+            # Wait generously for the page to move before even considering a
+            # second click — a premature re-click triggers the Sorry page.
+            wait_end = time.time() + 15
+            new_phase = await self._detect_booking_phase()
+            while time.time() < wait_end:
+                new_phase = await self._detect_booking_phase()
+                if new_phase in ("captcha", "review", "payment", "error"):
+                    break
+                await asyncio.sleep(0.6)
+            if new_phase == "error":
+                raise IrctcSessionError(
+                    "IRCTC 'Sorry!!! Please Try again!!' page appeared "
+                    "after passenger Continue"
+                )
+            if new_phase in ("captcha", "review", "payment"):
+                return
+            self._log(
+                f"  → still on passenger form after Continue "
+                f"(click {clicks}/{max_clicks}) — waiting"
+            )
+            await asyncio.sleep(2)
 
         phase = await self._detect_booking_phase()
+        if phase == "error":
+            raise IrctcSessionError(
+                f"IRCTC 'Sorry!!! Please Try again!!' page appeared (at step '{step}')"
+            )
         if phase == "payment":
             self._log(f"  → {step} skipped (payment page visible)")
             return
