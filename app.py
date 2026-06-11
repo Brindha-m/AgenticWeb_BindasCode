@@ -7,6 +7,9 @@ Changes from v1:
   - Added IRCTC quick-launch card on home page
   - API key can be entered inline and saved to .env
   - Headless toggle now shows warning for IRCTC
+  - Agent status bar shows engine badge
+  - Step cards show vision-click actions correctly
+  - Footer updated with page links
 """
 
 import asyncio
