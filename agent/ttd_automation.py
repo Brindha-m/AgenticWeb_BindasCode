@@ -1791,8 +1791,16 @@ async def _find_pilgrim_input(
 
     try:
         inputs = scope.locator("input:visible:not([type=hidden])")
+        n_inputs = await inputs.count()
+        n_selects = await scope.locator("mat-select:visible, select:visible").count()
+        if n_selects == 0 and n_inputs >= (index + 1) * 5:
+            # 5 inputs per row (gender / id-proof are input-based dropdowns):
+            # name, age, gender, id-proof, id-number
+            offset5 = {"name": 0, "age": 1, "id": 4}.get(formcontrol_hint, -1)
+            if offset5 >= 0:
+                return inputs.nth(index * 5 + offset5)
         offset = {"name": 0, "age": 1, "id": 2}.get(formcontrol_hint, -1)
-        if offset >= 0 and await inputs.count() > index * 3 + offset:
+        if offset >= 0 and n_inputs > index * 3 + offset:
             return inputs.nth(index * 3 + offset)
     except Exception:
         pass
@@ -1838,6 +1846,18 @@ async def _select_dropdown_irctc(page, combo, variants: tuple[str, ...]) -> bool
         return False
     try:
         await combo.scroll_into_view_if_needed()
+        try:
+            tag = str(await combo.evaluate("el => el.tagName.toLowerCase()"))
+        except Exception:
+            tag = ""
+        if tag == "select":
+            for variant in variants:
+                try:
+                    await combo.select_option(label=variant)
+                    return True
+                except Exception:
+                    continue
+            return False
         for _ in range(4):
             await combo.click(force=True)
             await asyncio.sleep(0.75)
@@ -1920,9 +1940,400 @@ async def _open_pilgrim_select_overlay(page, pilgrim_index: int, field_key: str)
             {"idx": pilgrim_index, "key": field_key},
         )
         if opened and opened.get("ok"):
+            await asyncio.sleep(0.5)
+            if await _mat_overlay_visible(page):
+                # JS-dispatched click already opened the panel — a real mouse
+                # click now would land on the overlay backdrop and close it.
+                return True
             await page.mouse.click(float(opened["x"]), float(opened["y"]))
             await asyncio.sleep(0.9)
             return await _mat_overlay_visible(page)
+    except Exception:
+        pass
+    return False
+
+
+async def _select_generic_dropdown(
+    page,
+    pilgrim_index: int,
+    field_key: str,
+    variants: tuple[str, ...],
+    *,
+    run: "TravelRun | None" = None,
+) -> bool:
+    """
+    Handle non-Material widgets: radio groups, ng-select, PrimeNG, bootstrap
+    and custom div/[role=combobox] dropdowns (pages with zero mat-select/select).
+    """
+    label_pat = "gender" if field_key == "gender" else "photo\\s*id|id\\s*proof|id\\s*type"
+
+    # 1) Radio-button style pickers (Gender is often radios on gov forms)
+    try:
+        picked = await page.evaluate(
+            f"""
+            (args) => {{
+                {_pilgrim_page_js()}
+                const {{ idx, labelPat, variants }} = args;
+                const root = pilgrimRoot();
+                const vis = (el) => el && el.offsetParent !== null;
+                let radios = [...root.querySelectorAll(
+                    'input[type=radio], mat-radio-button, .mat-mdc-radio-button'
+                )].filter(vis);
+                if (!radios.length) {{
+                    radios = [...document.querySelectorAll(
+                        'input[type=radio], mat-radio-button, .mat-mdc-radio-button'
+                    )].filter(vis);
+                }}
+                if (!radios.length) return '';
+                const groups = [];
+                const byName = new Map();
+                for (const r of radios) {{
+                    const nm = r.getAttribute('name')
+                        || r.querySelector?.('input')?.name || `g${{groups.length}}`;
+                    if (!byName.has(nm)) {{
+                        byName.set(nm, []);
+                        groups.push(byName.get(nm));
+                    }}
+                    byName.get(nm).push(r);
+                }}
+                const re = new RegExp(labelPat, 'i');
+                let group = groups.find((g) => re.test(
+                    (g[0].closest('div, fieldset, td, li, tr')?.parentElement?.innerText || '')
+                        .slice(0, 160)
+                ));
+                if (!group) group = groups[idx] || groups[0];
+                for (const v of variants) {{
+                    const needle = (v || '').toLowerCase();
+                    for (const r of group) {{
+                        const lab = (
+                            r.closest('label')?.innerText
+                            || (r.labels && r.labels[0]?.innerText)
+                            || r.parentElement?.innerText
+                            || r.value || r.getAttribute('aria-label') || ''
+                        ).replace(/\\s+/g, ' ').trim().toLowerCase();
+                        if (!lab) continue;
+                        if (lab === needle || lab.startsWith(needle) || needle.startsWith(lab)) {{
+                            const inp = r.matches('input') ? r : (r.querySelector('input') || r);
+                            inp.click();
+                            inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                            return lab;
+                        }}
+                    }}
+                }}
+                return '';
+            }}
+            """,
+            {"idx": pilgrim_index, "labelPat": label_pat, "variants": list(variants)},
+        )
+        if picked:
+            pl = str(picked).lower()
+            if any(v.lower() in pl or pl in v.lower() for v in variants if v):
+                if run:
+                    run._log(f"→ {field_key}: picked radio '{picked}'")
+                return True
+    except Exception:
+        pass
+
+    # 2) Custom combobox / framework dropdowns — click trigger, click option
+    find_trigger_js = f"""
+        (args) => {{
+            {_pilgrim_page_js()}
+            const {{ idx, key, labelPat }} = args;
+            const root = pilgrimRoot();
+            const vis = (el) => {{
+                if (!el || el.offsetParent === null) return false;
+                const r = el.getBoundingClientRect();
+                return r.width > 10 && r.height > 8;
+            }};
+            const candSel = 'select, mat-select, .mat-mdc-select, .ng-select, .p-dropdown, ' +
+                '[role="combobox"], [aria-haspopup="listbox"], .dropdown-toggle, ' +
+                '.select2-selection, .choices__inner';
+            let raw = [...root.querySelectorAll(candSel)];
+            let cands = raw.filter(
+                (el) => vis(el) && !raw.some((o) => o !== el && o.contains(el))
+            );
+            let fromDoc = false;
+            if (!cands.length) {{
+                raw = [...document.querySelectorAll(candSel)];
+                cands = raw.filter(
+                    (el) => vis(el) && !raw.some((o) => o !== el && o.contains(el))
+                );
+                fromDoc = true;
+            }}
+            if (!cands.length) return null;
+            const re = new RegExp(labelPat, 'i');
+            const labelled = cands.filter((el) => {{
+                const cont = el.closest(
+                    'mat-form-field, .mat-mdc-form-field, .form-group, .form-field, div, td, li'
+                );
+                return cont && re.test((cont.innerText || '').slice(0, 160));
+            }});
+            let el = labelled[idx] || labelled[0] || null;
+            if (!el && !fromDoc) {{
+                const off = key === 'gender' ? 0 : 1;
+                el = cands[idx * 2 + off] || null;
+            }}
+            if (!el) return null;
+            el.scrollIntoView({{ block: 'center', inline: 'nearest' }});
+            const r = el.getBoundingClientRect();
+            return {{
+                x: r.x + r.width / 2,
+                y: r.y + r.height / 2,
+                display: (el.value || el.innerText || '')
+                    .replace(/\\s+/g, ' ').trim().slice(0, 60),
+            }};
+        }}
+    """
+    pick_option_js = """
+        (variants) => {
+            const opts = [...document.querySelectorAll(
+                '.cdk-overlay-container mat-option, .cdk-overlay-container .mat-mdc-option, ' +
+                '[role="option"], .ng-dropdown-panel .ng-option, ' +
+                '.p-dropdown-items .p-dropdown-item, .dropdown-menu .dropdown-item, ' +
+                '.dropdown-menu li, .select2-results__option, [role="listbox"] li'
+            )].filter((o) => o.offsetParent !== null);
+            for (const v of variants) {
+                const needle = (v || '').toLowerCase();
+                for (const el of opts) {
+                    const t = (el.innerText || el.textContent || '').trim().toLowerCase();
+                    if (!t || t === 'select' || t === 'choose') continue;
+                    if (t === needle || t.startsWith(needle) || needle.startsWith(t)) {
+                        el.scrollIntoView({ block: 'nearest' });
+                        const r = el.getBoundingClientRect();
+                        const ev = { bubbles: true, cancelable: true,
+                                     clientX: r.x + r.width / 2, clientY: r.y + r.height / 2 };
+                        el.dispatchEvent(new PointerEvent('pointerdown', ev));
+                        el.dispatchEvent(new MouseEvent('mousedown', ev));
+                        el.dispatchEvent(new PointerEvent('pointerup', ev));
+                        el.dispatchEvent(new MouseEvent('mouseup', ev));
+                        el.click();
+                        return t;
+                    }
+                }
+            }
+            return '';
+        }
+    """
+    args = {"idx": pilgrim_index, "key": field_key, "labelPat": label_pat}
+
+    for _ in range(3):
+        try:
+            info = await page.evaluate(find_trigger_js, args)
+        except Exception:
+            info = None
+        if not info:
+            break
+        if _mat_option_selected(info.get("display") or "", variants):
+            return True
+
+        await page.mouse.click(float(info["x"]), float(info["y"]))
+        await asyncio.sleep(0.7)
+        try:
+            picked = str(await page.evaluate(pick_option_js, list(variants)) or "")
+        except Exception:
+            picked = ""
+        await asyncio.sleep(0.45)
+
+        try:
+            info2 = await page.evaluate(find_trigger_js, args)
+        except Exception:
+            info2 = None
+        if info2 and _mat_option_selected(info2.get("display") or "", variants):
+            if run:
+                run._log(f"→ {field_key}: generic dropdown set to '{info2.get('display')}'")
+            return True
+        if picked:
+            pl = picked.lower()
+            if any(v.lower() in pl or pl in v.lower() for v in variants if v):
+                if run:
+                    run._log(f"→ {field_key}: generic option clicked '{picked}'")
+                return True
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.3)
+
+    # 3) Dropdowns built on bare text inputs (e.g. TTD '.floating-input' rows:
+    #    name, age, gender, id-proof, id-number — gender/id-proof have no type attr)
+    return await _select_input_dropdown(page, pilgrim_index, field_key, variants, run=run)
+
+
+def _find_dropdown_input_js() -> str:
+    """JS: locate the gender / id-proof input in an input-only pilgrim row."""
+    return """
+        const ddInput = (root, idx, key) => {
+            const vis = (el) => el && el.offsetParent !== null;
+            const inputs = [...root.querySelectorAll('input:not([type=hidden])')]
+                .filter((i) => vis(i)
+                    && !['radio', 'checkbox', 'submit', 'button'].includes(i.type || ''));
+            if (!inputs.length) return null;
+            const dd = inputs.filter((i) => i.readOnly || !i.getAttribute('type'));
+            let el = null;
+            if (dd.length >= 2) {
+                el = dd[idx * 2 + (key === 'gender' ? 0 : 1)] || null;
+            }
+            if (!el && inputs.length >= (idx + 1) * 5) {
+                el = inputs[idx * 5 + (key === 'gender' ? 2 : 3)] || null;
+            }
+            return el;
+        };
+    """
+
+
+async def _select_input_dropdown(
+    page,
+    pilgrim_index: int,
+    field_key: str,
+    variants: tuple[str, ...],
+    *,
+    run: "TravelRun | None" = None,
+) -> bool:
+    """Click an input-based custom dropdown and pick the option that pops under it."""
+    find_input_js = f"""
+        (args) => {{
+            {_pilgrim_page_js()}
+            {_find_dropdown_input_js()}
+            const {{ idx, key }} = args;
+            const el = ddInput(pilgrimRoot(), idx, key);
+            if (!el) return null;
+            el.scrollIntoView({{ block: 'center', inline: 'nearest' }});
+            const r = el.getBoundingClientRect();
+            return {{
+                x: r.x + r.width / 2,
+                y: r.y + r.height / 2,
+                bottom: r.bottom,
+                value: (el.value || '').trim(),
+            }};
+        }}
+    """
+    # Click whichever visible option-like element matching the variant sits
+    # closest below the input (custom panels rarely use role="option").
+    pick_near_js = """
+        (args) => {
+            const { variants, x, bottom } = args;
+            const cands = [...document.querySelectorAll(
+                'li, [role="option"], .dropdown-item, .option, .item, button, a, span, div, label'
+            )].filter((el) => {
+                if (el.offsetParent === null) return false;
+                if (el.children.length > 1) return false;
+                const r = el.getBoundingClientRect();
+                if (r.height < 8 || r.height > 80 || r.width < 20) return false;
+                if (r.top < bottom - 60 || r.top > bottom + 400) return false;
+                return true;
+            });
+            for (const v of variants) {
+                const needle = (v || '').toLowerCase();
+                let best = null;
+                let bestScore = 1e9;
+                for (const el of cands) {
+                    const t = (el.innerText || el.textContent || '')
+                        .replace(/\\s+/g, ' ').trim().toLowerCase();
+                    if (!t || t === 'select' || t === 'choose') continue;
+                    if (t === needle || t.startsWith(needle) || needle.startsWith(t)) {
+                        const r = el.getBoundingClientRect();
+                        const score = Math.abs(r.top - bottom)
+                            + Math.abs((r.x + r.width / 2) - x) / 4;
+                        if (score < bestScore) { bestScore = score; best = el; }
+                    }
+                }
+                if (best) {
+                    best.scrollIntoView({ block: 'nearest' });
+                    const r = best.getBoundingClientRect();
+                    const ev = { bubbles: true, cancelable: true,
+                                 clientX: r.x + r.width / 2, clientY: r.y + r.height / 2 };
+                    best.dispatchEvent(new PointerEvent('pointerdown', ev));
+                    best.dispatchEvent(new MouseEvent('mousedown', ev));
+                    best.dispatchEvent(new PointerEvent('pointerup', ev));
+                    best.dispatchEvent(new MouseEvent('mouseup', ev));
+                    best.click();
+                    return (best.innerText || best.textContent || '').trim();
+                }
+            }
+            return '';
+        }
+    """
+    args = {"idx": pilgrim_index, "key": field_key}
+
+    async def _current_value() -> str:
+        try:
+            cur = await page.evaluate(find_input_js, args)
+            return (cur or {}).get("value") or ""
+        except Exception:
+            return ""
+
+    for attempt in range(3):
+        try:
+            info = await page.evaluate(find_input_js, args)
+        except Exception:
+            info = None
+        if not info:
+            return False
+        if _mat_option_selected(info.get("value") or "", variants):
+            return True
+
+        await page.mouse.click(float(info["x"]), float(info["y"]))
+        await asyncio.sleep(0.6)
+        try:
+            picked = str(
+                await page.evaluate(
+                    pick_near_js,
+                    {"variants": list(variants), "x": info["x"], "bottom": info["bottom"]},
+                )
+                or ""
+            )
+        except Exception:
+            picked = ""
+        await asyncio.sleep(0.4)
+        if _mat_option_selected(await _current_value(), variants):
+            if run:
+                run._log(f"→ {field_key}: input-dropdown set via option click")
+            return True
+
+        # Typing fallback: many custom dropdowns filter/accept typed text
+        if attempt == 1:
+            try:
+                await page.mouse.click(float(info["x"]), float(info["y"]))
+                await asyncio.sleep(0.3)
+                await page.keyboard.press("Control+A")
+                await page.keyboard.type(variants[0], delay=45)
+                await asyncio.sleep(0.5)
+                await page.evaluate(
+                    pick_near_js,
+                    {"variants": list(variants), "x": info["x"], "bottom": info["bottom"]},
+                )
+                await asyncio.sleep(0.3)
+                await page.keyboard.press("Enter")
+                await asyncio.sleep(0.35)
+                if _mat_option_selected(await _current_value(), variants):
+                    if run:
+                        run._log(f"→ {field_key}: input-dropdown set via typing")
+                    return True
+            except Exception:
+                pass
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.3)
+
+    # Last resort: set the input value directly with framework-friendly events
+    try:
+        ok = await page.evaluate(
+            f"""
+            (args) => {{
+                {_pilgrim_page_js()}
+                {_find_dropdown_input_js()}
+                const {{ idx, key, value }} = args;
+                const el = ddInput(pilgrimRoot(), idx, key);
+                if (!el) return false;
+                const ro = el.readOnly;
+                if (ro) el.readOnly = false;
+                const done = setInputValue(el, value);
+                if (ro) el.readOnly = true;
+                return done;
+            }}
+            """,
+            {"idx": pilgrim_index, "key": field_key, "value": variants[0]},
+        )
+        if ok and _mat_option_selected(await _current_value(), variants):
+            if run:
+                run._log(f"→ {field_key}: input-dropdown value set directly")
+            return True
     except Exception:
         pass
     return False
@@ -1948,6 +2359,58 @@ async def _select_pilgrim_dropdown_robust(
     fc_hints = ("gender",) if field_key == "gender" else ("proof", "idproof", "photoid", "idtype")
     label_pat = r"^gender" if field_key == "gender" else r"photo\s*id\s*proof|id\s*proof"
 
+    # Native <select> path — no CDK overlay involved, set value directly.
+    try:
+        picked_native = await page.evaluate(
+            f"""
+            (args) => {{
+                {_pilgrim_page_js()}
+                const {{ idx, key, variants }} = args;
+                let mf = null;
+                const row = pilgrimRowByLabels(idx);
+                if (row && row[key]) mf = row[key];
+                let sel = mf ? mf.querySelector('select') : null;
+                if (!sel) {{
+                    const root = pilgrimRoot();
+                    const sels = [...root.querySelectorAll('select')]
+                        .filter((s) => s.offsetParent !== null);
+                    if (sels.length) {{
+                        const off = key === 'gender' ? 0 : 1;
+                        sel = sels[idx * 2 + off] || null;
+                    }}
+                }}
+                if (!sel) return '';
+                for (const v of variants) {{
+                    const needle = (v || '').toLowerCase();
+                    for (const o of [...sel.options]) {{
+                        const t = (o.textContent || '').trim().toLowerCase();
+                        if (!t || t === 'select' || t === 'choose') continue;
+                        if (t === needle || t.startsWith(needle) || needle.startsWith(t)) {{
+                            sel.value = o.value;
+                            sel.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                            sel.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                            sel.dispatchEvent(new Event('blur', {{ bubbles: true }}));
+                            return t;
+                        }}
+                    }}
+                }}
+                return '';
+            }}
+            """,
+            {"idx": pilgrim_index, "key": field_key, "variants": list(variants)},
+        )
+        if picked_native:
+            await asyncio.sleep(0.3)
+            picked_l = str(picked_native).lower()
+            if any(v.lower() in picked_l or picked_l in v.lower() for v in variants if v):
+                return True
+    except Exception:
+        pass
+
+    # Non-Material widgets (radio groups, ng-select, custom comboboxes)
+    if await _select_generic_dropdown(page, pilgrim_index, field_key, variants, run=run):
+        return True
+
     async def _try_open_and_pick(combo) -> bool:
         if not combo:
             return False
@@ -1966,13 +2429,14 @@ async def _select_pilgrim_dropdown_robust(
                 if _mat_option_selected(state2.get(state_key, ""), variants):
                     return True
             if await _mat_overlay_visible(page):
-                if field_key == "gender":
-                    for _ in range(2):
-                        await page.keyboard.press("ArrowDown")
-                        await asyncio.sleep(0.1)
-                else:
-                    await page.keyboard.type("aad", delay=55)
+                # mat-select typeahead: typing the option prefix highlights it.
+                prefix = re.sub(r"[^a-zA-Z]", "", variants[0] if variants else "")[:4]
+                if prefix:
+                    await page.keyboard.type(prefix.lower(), delay=60)
                     await asyncio.sleep(0.25)
+                else:
+                    await page.keyboard.press("ArrowDown")
+                    await asyncio.sleep(0.1)
                 await page.keyboard.press("Enter")
                 await asyncio.sleep(0.4)
                 state2 = await _read_pilgrim_state_combined(page, pilgrim_index)
@@ -2029,10 +2493,56 @@ async def _select_pilgrim_dropdown_robust(
         await page.keyboard.press("Escape")
         await asyncio.sleep(0.35)
 
-    return _mat_option_selected(
+    final_ok = _mat_option_selected(
         (await _read_pilgrim_state_combined(page, pilgrim_index)).get(state_key, ""),
         variants,
     )
+    if not final_ok and run:
+        try:
+            diag = await page.evaluate(
+                f"""
+                () => {{
+                    {_pilgrim_page_js()}
+                    const vis = (el) => el && el.offsetParent !== null;
+                    const root = pilgrimRoot();
+                    const mats = [...document.querySelectorAll('mat-select, .mat-mdc-select')]
+                        .filter(vis).length;
+                    const nats = [...document.querySelectorAll('select')].filter(vis).length;
+                    const opts = [...document.querySelectorAll(
+                        '.cdk-overlay-container mat-option, ' +
+                        '.cdk-overlay-container .mat-mdc-option, [role="option"]'
+                    )].filter(vis).map((o) => (o.innerText || '').trim()).slice(0, 8);
+                    const ctrls = [...root.querySelectorAll(
+                        'input, select, textarea, mat-select, button, ' +
+                        '[role="combobox"], [aria-haspopup], .ng-select, .p-dropdown'
+                    )].filter(vis).slice(0, 18).map((el) => ({{
+                        t: el.tagName.toLowerCase(),
+                        ty: el.getAttribute('type') || '',
+                        cls: String(
+                            el.className && el.className.baseVal !== undefined
+                                ? el.className.baseVal
+                                : el.className || ''
+                        ).slice(0, 36),
+                        lab: (el.getAttribute('placeholder')
+                            || el.getAttribute('aria-label')
+                            || el.getAttribute('formcontrolname') || '').slice(0, 24),
+                        tx: (el.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 20),
+                    }}));
+                    return {{ mats, nats, opts, ctrls }};
+                }}
+                """
+            )
+            run._log(
+                f"… {field_key} debug (pilgrim {pilgrim_index + 1}): "
+                f"mat-selects={diag.get('mats')} native-selects={diag.get('nats')} "
+                f"overlay-options={diag.get('opts')}"
+            )
+            run._log(
+                f"… {field_key} controls (pilgrim {pilgrim_index + 1}): {diag.get('ctrls')}"
+            )
+        except Exception:
+            pass
+    return final_ok
 
 
 async def _read_pilgrim_locator_state(page, index: int = 0) -> dict:
@@ -2214,8 +2724,27 @@ def _pilgrim_page_js() -> str:
             const dy = ra.top - rb.top;
             return Math.abs(dy) > 12 ? dy : ra.left - rb.left;
         });
-        const inputs = byPos([...root.querySelectorAll('input:not([type=hidden])')]);
-        const selects = byPos([...root.querySelectorAll('mat-select, select')]);
+        const inputs = byPos([...root.querySelectorAll('input:not([type=hidden])')]
+            .filter((i) => !['radio', 'checkbox'].includes(i.type)
+                && !i.closest('.ng-select, .p-dropdown, mat-select, [role="listbox"]')));
+        const rawSelects = [...root.querySelectorAll(
+            'mat-select, select, .ng-select, .p-dropdown, ' +
+            '[role="combobox"], [aria-haspopup="listbox"]'
+        )];
+        const selects = byPos(rawSelects.filter(
+            (el) => !rawSelects.some((o) => o !== el && o.contains(el))
+        ));
+        if (!selects.length && inputs.length >= (idx + 1) * 5) {
+            // Input-only layout: name, age, gender, id-proof, id-number
+            const b = idx * 5;
+            return {
+                name: (inputs[b]?.value || '').trim(),
+                age: (inputs[b + 1]?.value || '').trim(),
+                gender: (inputs[b + 2]?.value || '').trim(),
+                id_proof: (inputs[b + 3]?.value || '').trim(),
+                id_num: (inputs[b + 4]?.value || '').trim(),
+            };
+        }
         const bi = idx * 3;
         const bs = idx * 2;
         const mf = (el) => el?.closest('mat-form-field, .mat-mdc-form-field') || el?.parentElement;
@@ -2390,10 +2919,25 @@ def _pilgrim_page_js() -> str:
 
     const selectDisplay = (mf) => {
         if (!mf) return '';
+        const nat = mf.querySelector('select');
+        if (nat) {
+            const o = nat.options[nat.selectedIndex];
+            return (o?.textContent || '').replace(/\\s+/g, ' ').trim();
+        }
         const el = mf.querySelector(
             '.mat-mdc-select-value-text, .mat-select-value-text, .mat-mdc-select-min-line, mat-select'
         );
-        return (el?.innerText || el?.textContent || '').replace(/\\s+/g, ' ').trim();
+        if (el) return (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+        const ng = mf.querySelector('.ng-select .ng-value, .ng-value, .p-dropdown-label');
+        if (ng) return (ng.innerText || ng.textContent || '').replace(/\\s+/g, ' ').trim();
+        const combo = mf.matches?.('[role="combobox"], [aria-haspopup="listbox"]')
+            ? mf
+            : mf.querySelector('[role="combobox"], [aria-haspopup="listbox"]');
+        if (combo) {
+            return (combo.value || combo.innerText || combo.textContent || '')
+                .replace(/\\s+/g, ' ').trim();
+        }
+        return '';
     };
 
     const inputValue = (mf) => {
@@ -3663,13 +4207,18 @@ def _spat_dom_js() -> str:
     };
 
     const fieldType = mf => {
-        if (mf.querySelector('mat-select, .mat-mdc-select')) return 'select';
+        if (mf.querySelector('mat-select, .mat-mdc-select, select')) return 'select';
         if (mf.querySelector('input:not([type=hidden])')) return 'input';
         return 'unknown';
     };
 
     const selectDisplay = mf => {
         if (!mf) return '';
+        const nat = mf.querySelector('select');
+        if (nat) {
+            const o = nat.options[nat.selectedIndex];
+            return (o?.textContent || '').replace(/\s+/g, ' ').trim();
+        }
         const el = mf.querySelector(
             '.mat-mdc-select-value-text, .mat-select-value-text, ' +
             '.mat-mdc-select-min-line, [class*="select-value"]'
@@ -4060,6 +4609,8 @@ async def _spat_fill_pilgrim_row_snapshot(
     gender_ok = await _select_pilgrim_dropdown_robust(
         page, index, "gender", gender_vars, run=run
     )
+    if not gender_ok and fmap.get("gender") is not None:
+        gender_ok = await _spat_open_and_pick_dropdown(page, fmap["gender"], gender_vars)
     if not gender_ok:
         run._log(f"⚠ Pilgrim {index + 1}: Gender not selected")
     await asyncio.sleep(0.25)
@@ -4068,6 +4619,8 @@ async def _spat_fill_pilgrim_row_snapshot(
     proof_ok = await _select_pilgrim_dropdown_robust(
         page, index, "idproof", proof_vars, run=run
     )
+    if not proof_ok and fmap.get("id_proof") is not None:
+        proof_ok = await _spat_open_and_pick_dropdown(page, fmap["id_proof"], proof_vars)
     if not proof_ok:
         run._log(f"⚠ Pilgrim {index + 1}: Photo ID Proof not selected")
     await asyncio.sleep(0.4)
