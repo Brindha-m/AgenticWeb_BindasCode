@@ -92,6 +92,7 @@ st.markdown("""
 ⚠️ <strong>Important before you start:</strong><br>
 • Chrome will open as a <strong>visible window</strong> — IRCTC blocks headless browsers<br>
 • You will need your <strong>IRCTC username, password, and mobile</strong> for OTP<br>
+• If IRCTC shows the new <strong>Alert / preferred language</strong> dialog, the agent selects <strong>English</strong><br>
 • Login happens <strong>before</strong> train search — answer each prompt on this page<br>
 • When the agent asks a question, a <strong>yellow input box appears below</strong> — type your answer and click Submit<br>
 • <strong>Payment is NEVER automated</strong> — you complete it manually in the browser
@@ -120,13 +121,36 @@ with col3:
     )
     passengers = st.number_input("Passengers", min_value=1, max_value=6, value=2)
 
-col4, col5 = st.columns(2)
+col4, col5, col6 = st.columns(3)
 with col4:
     train_class = st.selectbox("Class", ["SL", "3A", "2A", "1A", "CC", "EC", "2S"], index=0)
 with col5:
+    quota_label = st.selectbox(
+        "Quota",
+        ["General", "Tatkal", "Premium Tatkal", "Ladies", "Lower Berth / Sr. Citizen"],
+        index=0,
+        help="Selected before Search Trains on IRCTC.",
+    )
+    quota_map = {
+        "General": "GN",
+        "Tatkal": "TQ",
+        "Premium Tatkal": "PT",
+        "Ladies": "LD",
+        "Lower Berth / Sr. Citizen": "SS",
+    }
+    journey_quota = quota_map[quota_label]
+with col6:
     preferred_train = st.text_input(
         "Preferred train number (optional)",
         placeholder="e.g. 12676 for Kovai Express",
+    )
+
+if journey_quota in ("TQ", "PT"):
+    st.warning(
+        "Aadhaar authentication of the IRCTC user profile is mandatory to book "
+        "Tatkal and Premium Tatkal tickets. The agent opens MY ACCOUNT → Authenticate User "
+        "after login; complete Aadhaar/OTP in Chrome when it pauses.",
+        icon="⚠️",
     )
 
 # ─── SESSION STATE ───────────────────────────────────────────────────────────
@@ -252,6 +276,7 @@ if start_btn:
             "date": journey_date,
             "passengers": passengers,
             "train_class": train_class,
+            "journey_quota": journey_quota,
             "preferred_train": preferred_train,
         },
         st.session_state,
@@ -340,11 +365,9 @@ if st.session_state.irctc_human_q:
     is_login_form = question == "[LOGIN_FORM]" or "[LOGIN_FORM]" in question
     is_login_done = question == "[LOGIN_DONE]" or "[LOGIN_DONE]" in question
     is_search_done = question == "[SEARCH_DONE]" or "[SEARCH_DONE]" in question
+    is_aadhaar_done = question == "[AADHAAR_DONE]" or "[AADHAAR_DONE]" in question
     is_date_card = question == "[DATE_CARD]" or "[DATE_CARD]" in question
-    is_confirm_done = (
-        question in ("[CONFIRM_DONE]", "[SEARCH_DONE]", "[LOGIN_DONE]")
-        or (question.startswith("[") and "_DONE]" in question and not is_date_card)
-    )
+    is_confirm_done = question in ("[CONFIRM_DONE]", "[SEARCH_DONE]", "[LOGIN_DONE]", "[AADHAAR_DONE]")
 
     with human_placeholder.container():
         if st.session_state._human_sent:
@@ -363,6 +386,10 @@ if st.session_state.irctc_human_q:
                 st.markdown("After you click **Search Trains** in Chrome and see the train list:")
                 done_label = "✅ Search done — trains visible"
                 done_caption = "Only click when train numbers and times appear on screen."
+            elif is_aadhaar_done:
+                st.markdown("Complete **Aadhaar authentication** in Chrome, then confirm:")
+                done_label = "✅ Aadhaar done — continue"
+                done_caption = "If IRCTC says the profile is already authenticated, the agent should continue automatically."
             else:
                 st.markdown("When the step is complete in Chrome:")
                 done_label = "✅ Done — continue"
@@ -522,5 +549,6 @@ with st.expander("💡 Tips for best results"):
 **If the agent fails:**
 - IRCTC sometimes rejects headless-looking browsers — try again
 - If CAPTCHA fails, click 'Refresh CAPTCHA' manually in browser
+- `CNF route` / `All route info` means IRCTC found confirmed split or connecting journeys; direct train booking still uses the selected train row
 - The agent auto-recovers from most errors via vision re-observation
 """)
