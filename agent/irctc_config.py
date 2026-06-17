@@ -48,6 +48,7 @@ class IRCTCConfig:
     journey_date: str = ""
     journey_date_offset_days: int = 2  # used when IRCTC_JOURNEY_DATE is empty
     train_class: str = "SL"
+    journey_quota: str = "GN"
     preferred_train: str = ""
     mobile: str = ""
     payment_method: str = "IRCTC_IPAY"  # IRCTC_IPAY | UPI | WALLET
@@ -91,6 +92,7 @@ class IRCTCConfig:
             journey_date=journey_date,
             journey_date_offset_days=offset_days,
             train_class=os.getenv("IRCTC_CLASS", "SL").strip().upper(),
+            journey_quota=os.getenv("IRCTC_QUOTA", "GN").strip().upper(),
             preferred_train=os.getenv("IRCTC_PREFERRED_TRAIN", "").strip(),
             mobile=os.getenv("IRCTC_MOBILE", "").strip(),
             payment_method=os.getenv("IRCTC_PAYMENT_METHOD", "IRCTC_IPAY").strip().upper(),

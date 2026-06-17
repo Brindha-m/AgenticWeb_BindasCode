@@ -67,6 +67,7 @@ class IRCTCSession:
     date: str = field(default_factory=lambda: datetime.now().strftime("%d/%m/%Y"))
     passengers: int = 2
     train_class: str = "SL"       # Sleeper
+    journey_quota: str = "GN"     # General; TQ = Tatkal
     preferred_train: str = ""     # e.g. "12676" for Kovai Express
     steps_done: list = field(default_factory=list)
     log: list = field(default_factory=list)
@@ -94,6 +95,7 @@ class IRCTCAgent:
         self._human_response: Optional[str] = None
         self._anthropic = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
         self._force_close_browser = False
+        self._route_info_hint_logged = False
 
     # ─── CDP CORE ────────────────────────────────────────────────────────────
 
@@ -763,20 +765,62 @@ class IRCTCAgent:
             await asyncio.sleep(0.5)
         return False
 
-    async def _dismiss_blocking_overlays(self) -> None:
-        await self._click_dom("""
+    async def _dismiss_blocking_overlays(self) -> bool:
+        dismissed = await self._click_dom("""
         (() => {
-            for (const el of document.querySelectorAll('button, a, span, i')) {
-                if (!el.offsetParent) continue;
-                const t = (el.innerText || el.getAttribute('aria-label') || '').trim();
-                if (/^(close|×|✕|ok|accept|dismiss)$/i.test(t) && t.length < 20) {
-                    el.click();
-                    return true;
+            const visible = (el) => {
+                if (!el) return false;
+                const r = el.getBoundingClientRect();
+                const s = getComputedStyle(el);
+                return r.width > 2 && r.height > 2 && s.display !== 'none' && s.visibility !== 'hidden';
+            };
+            const fire = (el) => {
+                el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                el.click();
+                return true;
+            };
+            for (const root of document.querySelectorAll('p-dialog, [role="dialog"], .ui-dialog, .modal, .cdk-overlay-pane')) {
+                if (!visible(root)) continue;
+                const body = (root.innerText || '').replace(/\\s+/g, ' ').trim();
+                if (!/Alert|Welcome to IRCTC|preferred language|select your preferred language/i.test(body)) continue;
+                for (const el of root.querySelectorAll('button, a, span')) {
+                    if (!visible(el)) continue;
+                    const t = (el.innerText || el.getAttribute('aria-label') || '').trim();
+                    if (/^(English|OK|Accept|Close)$/i.test(t)) return fire(el);
                 }
+            }
+            for (const el of document.querySelectorAll('button, a, span, i')) {
+                if (!visible(el)) continue;
+                const t = (el.innerText || el.getAttribute('aria-label') || '').trim();
+                if (/^(english|close|×|✕|ok|accept|dismiss)$/i.test(t) && t.length < 20) return fire(el);
             }
             return false;
         })()
         """)
+        if dismissed:
+            self._log("  → Closed blocking IRCTC popup")
+            await asyncio.sleep(0.5)
+        return bool(dismissed)
+
+    async def _log_route_info_hint(self) -> None:
+        if self._route_info_hint_logged:
+            return
+        text = await self._evaluate("""
+        (() => (document.body?.innerText || '').replace(/\\s+/g, ' ').trim())()
+        """)
+        if not text:
+            return
+        if not any(
+            marker in text.lower()
+            for marker in ("all route info", "connecting train", "cnf route", "route info")
+        ):
+            return
+        self._route_info_hint_logged = True
+        self._log(
+            "ℹ️ IRCTC route-info banner detected: CNF route usually means a split/connecting "
+            "journey has confirmed seats; direct train booking still uses the selected train row."
+        )
 
     async def _log_search_form_debug(self) -> None:
         info = await self._evaluate(
@@ -1017,6 +1061,185 @@ class IRCTCAgent:
         }})()
         """)
 
+    async def _select_quota_dom(self, quota_code: str, quota_label: str) -> bool:
+        code_json = json.dumps((quota_code or "GN").upper())
+        label_json = json.dumps(quota_label)
+        opened = await self._click_dom(f"""
+        (() => {{
+            const visible = (el) => {{
+                if (!el) return false;
+                const r = el.getBoundingClientRect();
+                const s = getComputedStyle(el);
+                return r.width > 2 && r.height > 2 && s.display !== 'none' && s.visibility !== 'hidden';
+            }};
+            const triggers = document.querySelectorAll(
+                '#journeyQuota .p-dropdown-trigger, #journeyQuota, '
+                + 'p-dropdown[formcontrolname*="quota" i] .p-dropdown-trigger, '
+                + 'p-dropdown[formcontrolname*="Quota" i] .p-dropdown-trigger, '
+                + 'p-dropdown[formcontrolname*="quota" i] .p-dropdown-label'
+            );
+            for (const t of triggers) {{
+                if (visible(t)) {{ t.click(); return true; }}
+            }}
+            const labels = [...document.querySelectorAll('label, span')].filter(
+                (el) => /quota/i.test((el.innerText || '').trim()) && visible(el)
+            );
+            if (labels[0]) {{ labels[0].click(); return true; }}
+            return false;
+        }})()
+        """)
+        if not opened:
+            return False
+        await asyncio.sleep(0.5)
+        return await self._click_dom(f"""
+        (() => {{
+            const code = {code_json};
+            const label = {label_json};
+            const items = document.querySelectorAll(
+                'p-dropdown-panel li, .ui-dropdown-item, [role="option"], .cdk-overlay-pane li'
+            );
+            for (const li of items) {{
+                const t = (li.innerText || '').trim();
+                const upper = t.toUpperCase();
+                if (upper.includes(code) || upper.includes(label.toUpperCase())) {{
+                    li.click();
+                    return true;
+                }}
+            }}
+            return false;
+        }})()
+        """)
+
+    async def _maybe_handle_aadhaar_auth_handoff(self) -> None:
+        """For Tatkal quotas, open IRCTC Aadhaar auth if prompted, then pause for manual OTP."""
+        if self.session.journey_quota not in ("TQ", "PT"):
+            return
+
+        body = await self._evaluate("""
+        (() => (document.body?.innerText || '').replace(/\\s+/g, ' ').trim())()
+        """)
+        text = str(body or "")
+        needs_auth = bool(
+            "aadhaar" in text.lower()
+            and (
+                "authenticate" in text.lower()
+                or "verified" in text.lower()
+                or "mandatory" in text.lower()
+            )
+        )
+        clicked = await self._open_aadhaar_auth_from_account_menu()
+        if not clicked:
+            clicked = await self._click_aadhaar_authenticate_now()
+
+        if await self._aadhaar_already_authenticated():
+            self._log("✅ IRCTC profile already Aadhaar authenticated — continuing to search")
+            await self.navigate("https://www.irctc.co.in/nget/train-search")
+            await self._dismiss_blocking_overlays()
+            return
+
+        if not needs_auth and not clicked:
+            self._log("  → No Aadhaar auth prompt visible; assuming IRCTC profile is already verified")
+            return
+
+        self._log("⚠ Aadhaar authentication page opened from MY ACCOUNT → Authenticate User")
+        confirmed = await self.ask_human_confirm(
+            "Complete Aadhaar authentication in Chrome. Enter Aadhaar/OTP only on IRCTC, "
+            "then press the confirmation button here.",
+            tag="AADHAAR_DONE",
+        )
+        if not confirmed:
+            raise RuntimeError("Aadhaar authentication cancelled")
+
+        await self.navigate("https://www.irctc.co.in/nget/train-search")
+        await self._dismiss_blocking_overlays()
+        self._log("✅ Aadhaar authentication handoff complete")
+
+    async def _aadhaar_already_authenticated(self) -> bool:
+        body = await self._evaluate("""
+        (() => (document.body?.innerText || '').replace(/\\s+/g, ' ').trim())()
+        """)
+        text = str(body or "")
+        return (
+            "profile details are successfully authenticated with aadhaar" in text.lower()
+            or "successfully authenticated with aadhaar" in text.lower()
+            or (
+                "aadhaar" in text.lower()
+                and ("already verified" in text.lower() or "already authenticated" in text.lower())
+            )
+        )
+
+    async def _open_aadhaar_auth_from_account_menu(self) -> bool:
+        opened = await self._click_dom("""
+        (() => {
+            const visible = (el) => {
+                if (!el) return false;
+                const r = el.getBoundingClientRect();
+                const s = getComputedStyle(el);
+                return r.width > 2 && r.height > 2 && s.display !== 'none' && s.visibility !== 'hidden';
+            };
+            const fire = (el, type) => el.dispatchEvent(
+                new MouseEvent(type, { bubbles: true, cancelable: true, view: window })
+            );
+            const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+            const account = [...document.querySelectorAll('a, button, span, li')]
+                .find((el) => visible(el) && /MY\\s+ACCOUNT/i.test(norm(el.innerText || el.textContent)));
+            if (!account) return false;
+            fire(account, 'mouseover');
+            fire(account, 'mouseenter');
+            fire(account, 'mousedown');
+            fire(account, 'click');
+            account.click();
+            return true;
+        })()
+        """)
+        if not opened:
+            return False
+        await asyncio.sleep(1)
+        return await self._click_dom("""
+        (() => {
+            const visible = (el) => {
+                if (!el) return false;
+                const r = el.getBoundingClientRect();
+                const s = getComputedStyle(el);
+                return r.width > 2 && r.height > 2 && s.display !== 'none' && s.visibility !== 'hidden';
+            };
+            for (const el of document.querySelectorAll('a, button, span, li')) {
+                if (!visible(el)) continue;
+                const t = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+                if (/Authenticate\\s+User/i.test(t)) {
+                    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                    el.click();
+                    return true;
+                }
+            }
+            return false;
+        })()
+        """)
+
+    async def _click_aadhaar_authenticate_now(self) -> bool:
+        return await self._click_dom("""
+        (() => {
+            const visible = (el) => {
+                if (!el) return false;
+                const r = el.getBoundingClientRect();
+                const s = getComputedStyle(el);
+                return r.width > 2 && r.height > 2 && s.display !== 'none' && s.visibility !== 'hidden';
+            };
+            for (const el of document.querySelectorAll('button, a, span')) {
+                if (!visible(el)) continue;
+                const t = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+                if (/Authenticate\\s+now|Authenticate/i.test(t)) {
+                    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                    el.click();
+                    return true;
+                }
+            }
+            return false;
+        })()
+        """)
+
     async def _click_search_trains_dom(self) -> bool:
         return await self._click_dom("""
         (() => {
@@ -1098,26 +1321,16 @@ class IRCTCAgent:
         await asyncio.sleep(1.5)
 
         # Dismiss popup via DOM first (faster than vision round-trip)
-        dismissed = await self._click_dom("""
-        (() => {
-            for (const el of document.querySelectorAll('button, a, span, i')) {
-                if (!el.offsetParent) continue;
-                const t = (el.innerText || el.getAttribute('aria-label') || '').trim();
-                if (/close|dismiss|accept|ok|×|✕/i.test(t) && t.length < 20) {
-                    el.click();
-                    return true;
-                }
-            }
-            return false;
-        })()
-        """)
+        dismissed = await self._dismiss_blocking_overlays()
         if not dismissed:
             has_popup = await self.vision_ask(
                 "Is there a popup, modal, or cookie consent visible? YES or NO"
             )
             if "YES" in has_popup.upper():
                 self._log("  Closing popup...")
-                await self.vision_click("the close/dismiss button on the popup or modal")
+                await self.vision_click(
+                    "the English, OK, close, or dismiss button on the popup or modal"
+                )
 
         self._log("✅ IRCTC loaded")
         return True
@@ -1232,16 +1445,6 @@ class IRCTCAgent:
             f"  Route: {self.session.source_name} ({self.session.source}) → "
             f"{self.session.dest_name} ({self.session.destination})"
         )
-        self._log(f"  Date: {self.session.date} (today) · Class: {self.session.train_class}")
-
-        await self.navigate("https://www.irctc.co.in/nget/train-search")
-        await self._dismiss_blocking_overlays()
-        if not await self._wait_for_search_form():
-            self._log("  ⚠ Waiting for booking form to load...")
-            await asyncio.sleep(3)
-        await self._dismiss_blocking_overlays()
-        await asyncio.sleep(0.8)
-
         class_labels = {
             "SL": "Sleeper (SL)",
             "3A": "AC 3 Tier (3A)",
@@ -1251,7 +1454,34 @@ class IRCTCAgent:
             "EC": "Executive Class (EC)",
             "2S": "Second Sitting (2S)",
         }
+        quota_labels = {
+            "GN": "GENERAL",
+            "TQ": "TATKAL",
+            "PT": "PREMIUM TATKAL",
+            "LD": "LADIES",
+            "SS": "LOWER BERTH/SR.CITIZEN",
+        }
         class_label = class_labels.get(self.session.train_class, self.session.train_class)
+        quota_label = quota_labels.get(self.session.journey_quota, self.session.journey_quota)
+
+        self._log(
+            f"  Date: {self.session.date} (today) · Class: {self.session.train_class} "
+            f"· Quota: {quota_label}"
+        )
+        if self.session.journey_quota in ("TQ", "PT"):
+            self._log(
+                "⚠ Aadhaar-authenticated IRCTC profile is mandatory for Tatkal / "
+                "Premium Tatkal booking."
+            )
+
+        await self.navigate("https://www.irctc.co.in/nget/train-search")
+        await self._dismiss_blocking_overlays()
+        if not await self._wait_for_search_form():
+            self._log("  ⚠ Waiting for booking form to load...")
+            await asyncio.sleep(3)
+        await self._dismiss_blocking_overlays()
+        await self._maybe_handle_aadhaar_auth_handoff()
+        await asyncio.sleep(0.8)
 
         for attempt in range(1, 4):
             self._log(f"  Search attempt {attempt}/3 (DOM)")
@@ -1281,6 +1511,9 @@ class IRCTCAgent:
             if not await self._select_class_dom(self.session.train_class, class_label):
                 self._log(f"  ⚠ Class dropdown — using default if already set")
 
+            if not await self._select_quota_dom(self.session.journey_quota, quota_label):
+                self._log(f"  ⚠ Quota dropdown — using default if already set")
+
             if not await self._click_search_trains_dom():
                 self._log("  ⚠ Search button not found via DOM")
                 continue
@@ -1289,6 +1522,7 @@ class IRCTCAgent:
 
             if await self._has_train_results_dom() or await self._has_train_results():
                 self._log("✅ Train results found")
+                await self._log_route_info_hint()
                 return True
 
             self._log("  ⚠ No train list yet — retrying")
@@ -1300,6 +1534,7 @@ class IRCTCAgent:
             f"• To: {self.session.dest_name} ({self.session.destination})\n"
             f"• Date: {self.session.date}\n"
             f"• Class: {class_label}\n"
+            f"• Quota: {quota_label}\n"
             "Click **Search Trains**, then press the green button below.",
             tag="SEARCH_DONE",
         )
@@ -1308,10 +1543,12 @@ class IRCTCAgent:
             await self._has_train_results_dom() or await self._has_train_results()
         ):
             self._log("✅ Train results visible after manual search")
+            await self._log_route_info_hint()
             return True
 
         if await self._has_train_results_dom():
             self._log("✅ Train results visible")
+            await self._log_route_info_hint()
             return True
 
         return self._fail_step(

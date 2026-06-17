@@ -52,6 +52,14 @@ CLASS_TAB_TEXT = {
     "2S": ["Second Sitting (2S)", "2S"],
 }
 
+QUOTA_LABELS = {
+    "GN": "GENERAL",
+    "TQ": "TATKAL",
+    "PT": "PREMIUM TATKAL",
+    "LD": "LADIES",
+    "SS": "LOWER BERTH/SR.CITIZEN",
+}
+
 
 class IrctcSessionError(RuntimeError):
     """IRCTC 'Sorry!!! Please Try again!!' page — booking must restart from search."""
@@ -77,6 +85,7 @@ class IRCTCPlaywrightBot:
         self.steps_done: list[str] = []
         self.log: list[str] = []
         self._post_book_dialog_handled = False
+        self._route_info_hint_logged = False
 
     # ─── lifecycle ───────────────────────────────────────────────────────
 
@@ -279,8 +288,14 @@ class IRCTCPlaywrightBot:
         self._log(
             f"  {self.config.from_name} ({self.config.from_station}) → "
             f"{self.config.to_name} ({self.config.to_station}) · "
-            f"{self.config.journey_date} · {self.config.train_class}"
+            f"{self.config.journey_date} · {self.config.train_class} · "
+            f"{QUOTA_LABELS.get(self.config.journey_quota, self.config.journey_quota)}"
         )
+        if self.config.journey_quota in ("TQ", "PT"):
+            self._log(
+                "⚠ Aadhaar-authenticated IRCTC profile is mandatory for Tatkal / "
+                "Premium Tatkal booking."
+            )
 
         await self._ensure_logged_in()
 
@@ -288,6 +303,7 @@ class IRCTCPlaywrightBot:
             await self.page.goto(self.IRCTC_URL, wait_until="domcontentloaded", timeout=60000)
         await self._dismiss_popup()
         await self._ensure_logged_in()
+        await self._maybe_handle_aadhaar_auth_handoff()
         await asyncio.sleep(1)
 
         await self._fill_station("origin", self.config.from_name, self.config.from_station)
@@ -295,6 +311,7 @@ class IRCTCPlaywrightBot:
         await self._fill_journey_date(self.config.journey_date)
         # Anik repo: select Sleeper (SL) in #journeyClass BEFORE search
         await self._select_journey_class_anik(self.config.train_class)
+        await self._select_journey_quota_anik(self.config.journey_quota)
 
         if not await self._click_search():
             raise RuntimeError("Search Trains button not found")
@@ -304,6 +321,7 @@ class IRCTCPlaywrightBot:
         if not await self._has_train_results():
             raise RuntimeError("No train results visible after search")
         self._log("✅ Train results found")
+        await self._log_route_info_hint()
 
     async def _anik_pause(self, base: float = 4, extra: float = 3) -> None:
         """Human-like pause matching Anik-mitra08/playwright-automation-irctc."""
@@ -424,6 +442,169 @@ class IRCTCPlaywrightBot:
         else:
             await self.page.locator(f"li:has-text('{class_code}')").first.click()
             self._log(f"  → Search class: {class_code}")
+
+    async def _select_journey_quota_anik(self, quota_code: str) -> None:
+        """Select search quota before Search, e.g. GENERAL or TATKAL."""
+        code = (quota_code or "GN").upper()
+        label = QUOTA_LABELS.get(code, code)
+        trigger = self.page.locator(
+            "#journeyQuota div, #journeyQuota, "
+            'p-dropdown[formcontrolname*="quota" i], p-dropdown[formcontrolname*="Quota" i]'
+        ).first
+        if not await trigger.is_visible():
+            return
+        current = ((await trigger.inner_text()) or "").upper()
+        if code in current or label in current:
+            self._log(f"  → Search quota: {label}")
+            return
+        await trigger.click()
+        await self._anik_pause(1, 1)
+        option = self.page.locator(
+            f"#journeyQuota li:has-text('{label}'), "
+            f"p-dropdownitem li:has-text('{label}'), "
+            f"li:has-text('{label}'), li:has-text('{code}')"
+        ).first
+        if await option.is_visible():
+            await option.click()
+            self._log(f"  → Search quota: {label}")
+            await asyncio.sleep(0.5)
+
+    async def _maybe_handle_aadhaar_auth_handoff(self) -> None:
+        """For Tatkal quotas, open IRCTC Aadhaar auth if prompted, then pause for manual OTP."""
+        if self.config.journey_quota not in ("TQ", "PT"):
+            return
+
+        try:
+            body = await self.page.inner_text("body", timeout=3000)
+        except Exception:
+            body = ""
+
+        needs_auth = bool(
+            re.search(
+                r"Aadhaar.*(Authenticate|Verified|mandatory)|Authenticate\s+now",
+                body,
+                re.I,
+            )
+        )
+        clicked = await self._open_aadhaar_auth_from_account_menu()
+        if not clicked:
+            clicked = await self._click_aadhaar_authenticate_now()
+
+        if await self._aadhaar_already_authenticated():
+            self._log("✅ IRCTC profile already Aadhaar authenticated — continuing to search")
+            if "train-search" not in (self.page.url or ""):
+                await self.page.goto(self.IRCTC_URL, wait_until="domcontentloaded", timeout=60000)
+                await self._dismiss_popup()
+            return
+
+        if not needs_auth and not clicked:
+            self._log("  → No Aadhaar auth prompt visible; assuming IRCTC profile is already verified")
+            return
+
+        self._log("⚠ Aadhaar authentication page opened from MY ACCOUNT → Authenticate User")
+        reply = await self._ask_human(
+            "[AADHAAR_DONE] Complete Aadhaar authentication in Chrome. "
+            "Enter Aadhaar/OTP only on IRCTC, then click the confirmation button here."
+        )
+        if reply.strip().upper() == "CANCEL":
+            raise RuntimeError("Aadhaar authentication cancelled")
+
+        if "train-search" not in (self.page.url or ""):
+            await self.page.goto(self.IRCTC_URL, wait_until="domcontentloaded", timeout=60000)
+            await self._dismiss_popup()
+        self._log("✅ Aadhaar authentication handoff complete")
+
+    async def _aadhaar_already_authenticated(self) -> bool:
+        try:
+            text = await self.page.inner_text("body", timeout=3000)
+        except Exception:
+            return False
+        return bool(
+            re.search(
+                r"profile\s+details\s+are\s+successfully\s+authenticated\s+with\s+Aadhaar|"
+                r"successfully\s+authenticated\s+with\s+Aadhaar|"
+                r"Aadhaar\s+(?:is\s+)?(?:already\s+)?(?:verified|authenticated)",
+                text,
+                re.I,
+            )
+        )
+
+    async def _open_aadhaar_auth_from_account_menu(self) -> bool:
+        """Open MY ACCOUNT → Authenticate User, matching IRCTC's logged-in menu."""
+        for account in (
+            self.page.get_by_text(re.compile(r"MY\s+ACCOUNT", re.I)).first,
+            self.page.locator("a, span, button").filter(has_text=re.compile(r"MY\s+ACCOUNT", re.I)).first,
+        ):
+            try:
+                if not await account.is_visible():
+                    continue
+                await account.hover()
+                await asyncio.sleep(0.5)
+                await account.click(force=True)
+                await asyncio.sleep(0.8)
+                auth = self.page.get_by_text(re.compile(r"Authenticate\s+User", re.I)).first
+                if await auth.is_visible():
+                    await auth.click(force=True)
+                    await asyncio.sleep(2)
+                    return True
+            except Exception:
+                continue
+
+        clicked = await self.page.evaluate(
+            """
+            () => {
+                const visible = (el) => {
+                    if (!el) return false;
+                    const r = el.getBoundingClientRect();
+                    const s = getComputedStyle(el);
+                    return r.width > 2 && r.height > 2 && s.display !== 'none' && s.visibility !== 'hidden';
+                };
+                const fire = (el, type) => el.dispatchEvent(
+                    new MouseEvent(type, { bubbles: true, cancelable: true, view: window })
+                );
+                const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+                const account = [...document.querySelectorAll('a, button, span, li')]
+                    .find((el) => visible(el) && /MY\\s+ACCOUNT/i.test(norm(el.innerText || el.textContent)));
+                if (!account) return false;
+                fire(account, 'mouseover');
+                fire(account, 'mouseenter');
+                fire(account, 'mousedown');
+                fire(account, 'click');
+                account.click();
+                return true;
+            }
+            """
+        )
+        if not clicked:
+            return False
+
+        await asyncio.sleep(1)
+        auth = self.page.get_by_text(re.compile(r"Authenticate\s+User", re.I)).first
+        if await auth.is_visible():
+            await auth.click(force=True)
+            await asyncio.sleep(2)
+            return True
+        return False
+
+    async def _click_aadhaar_authenticate_now(self) -> bool:
+        for loc in (
+            self.page.get_by_role("button", name=re.compile(r"Authenticate\s+now", re.I)),
+            self.page.locator("button, a, span").filter(
+                has_text=re.compile(r"Authenticate\s+now|Authenticate", re.I)
+            ),
+        ):
+            try:
+                if await loc.count() == 0:
+                    continue
+                el = loc.first
+                if not await el.is_visible():
+                    continue
+                await el.click(force=True)
+                await asyncio.sleep(2)
+                return True
+            except Exception:
+                continue
+        return False
 
     async def _select_class_tab_anik(self, row, class_code: str) -> bool:
         """Click horizontal class tab e.g. 'Sleeper (SL)' on expanded train row."""
@@ -1056,9 +1237,7 @@ class IRCTCPlaywrightBot:
             self._log("  → Clicking Continue on passenger form...")
             await self._click_passenger_continue("passenger")
 
-        phase = await self._wait_booking_phase_transition(
-            after="passenger_continue", timeout=20
-        )
+        phase = await self._wait_after_single_passenger_continue(timeout=45)
         self._log(f"  → Booking phase: {phase}")
 
         if phase == "error":
@@ -1073,15 +1252,70 @@ class IRCTCPlaywrightBot:
             )
             self._log(f"  → After CAPTCHA: {phase}")
 
+        if phase == "error":
+            raise IrctcSessionError(
+                "IRCTC 'Sorry!!! Please Try again!!' page appeared after passenger step"
+            )
+
         if phase == "payment":
             self._log("  → On payment page — passenger step complete")
         elif phase in ("review", "passenger", "unknown"):
-            await self._click_passenger_continue("review")
+            self._log(
+                "  → Passenger Continue clicked once; waiting for IRCTC to finish transition"
+            )
+            phase = await self._wait_after_single_passenger_continue(timeout=45)
+            self._log(f"  → After wait: {phase}")
+            if phase == "error":
+                raise IrctcSessionError(
+                    "IRCTC 'Sorry!!! Please Try again!!' page appeared after passenger Continue"
+                )
+            if phase == "captcha":
+                await self._handle_booking_captcha()
+                phase = await self._wait_booking_phase_transition(
+                    after="captcha", timeout=30
+                )
+                self._log(f"  → After CAPTCHA: {phase}")
+            if phase != "payment":
+                self._log(
+                    "  ⚠ Payment page did not load after the single passenger Continue. "
+                    "Complete only the visible IRCTC Continue/CAPTCHA in Chrome if needed."
+                )
+                phase = await self._manual_payment_phase_handoff(phase)
+                if phase != "payment":
+                    raise RuntimeError(
+                        f"Payment page did not load after passenger Continue (phase={phase})"
+                    )
+        else:
+            phase = await self._manual_payment_phase_handoff(phase)
+            if phase != "payment":
+                raise RuntimeError(
+                    f"Payment page did not load after passenger Continue (phase={phase})"
+                )
         self._log("✅ Passenger details submitted")
+
+    async def _manual_payment_phase_handoff(self, phase: str) -> str:
+        """Pause instead of failing when IRCTC is between passenger and payment pages."""
+        self._log(f"  ⚠ Waiting for manual passenger→payment confirmation (phase={phase})")
+        reply = await self._ask_human(
+            "After passenger Continue, Chrome did not clearly reach payment. "
+            "If a CAPTCHA or extra Continue is visible, complete only that visible step. "
+            "Type DONE when the payment page is visible, or CANCEL to stop:"
+        )
+        if reply.strip().upper() == "CANCEL":
+            raise RuntimeError("Passenger to payment transition cancelled")
+        await self._anik_pause(1.5, 1)
+        phase = await self._detect_booking_phase()
+        self._log(f"  → Manual handoff phase: {phase}")
+        if phase == "error":
+            raise IrctcSessionError(
+                "IRCTC 'Sorry!!! Please Try again!!' page appeared after passenger Continue"
+            )
+        return phase
 
     async def _step_payment(self) -> None:
         self._log("📍 Step 6: Payment automation")
         await asyncio.sleep(2)
+        await self._raise_if_irctc_sorry_page("before payment")
 
         method = self.config.payment_method
         provider = self.config.payment_provider
@@ -1101,7 +1335,9 @@ class IRCTCPlaywrightBot:
                 self._log("  → IRCTC iPay selected")
 
         await self._click_payment_continue()
+        await self._raise_if_irctc_sorry_page("after payment Continue")
         await self._handle_booking_captcha()
+        await self._raise_if_irctc_sorry_page("after payment CAPTCHA")
 
         card = self.page.locator("div").filter(
             has_text=re.compile(
@@ -1112,14 +1348,17 @@ class IRCTCPlaywrightBot:
         if await card.is_visible():
             await card.click(force=True)
             self._log("  → IRCTC payment card selected")
+            await self._anik_pause(1.5, 1)
 
-        await self._click_payment_continue(sidebar=True)
+        if await self._click_payment_action("payment gateway continue"):
+            await self._anik_pause(3, 2)
+        else:
+            self._log("  ⚠ Payment Continue/Pay button not found automatically")
+        await self._raise_if_irctc_sorry_page("after payment sidebar Continue")
 
-        pay_book = self.page.get_by_role("button", name=re.compile(r"Pay\s*&\s*Book", re.I))
-        if await pay_book.is_visible():
-            await pay_book.click()
-            self._log("  → Pay & Book clicked")
+        if await self._click_payment_action("Pay & Book"):
             await asyncio.sleep(3)
+            await self._raise_if_irctc_sorry_page("after Pay & Book")
 
         if provider:
             provider_btn = self.page.get_by_text(provider, exact=False).first
@@ -1140,6 +1379,72 @@ class IRCTCPlaywrightBot:
             self._log("✅ Booking confirmed")
         else:
             self._log("ℹ️ Payment step ended — check browser for PNR")
+
+    async def _click_payment_action(self, label: str) -> bool:
+        """Click the next visible payment action without touching passenger form Continue."""
+        patterns = re.compile(
+            r"^(Continue|Proceed|Pay\s*&\s*Book|Pay\s+and\s+Book|Make\s+Payment|Pay|Submit)$",
+            re.I,
+        )
+        for loc in (
+            self.page.get_by_role("button", name=patterns),
+            self.page.locator("app-payment button, app-payment a").filter(has_text=patterns),
+            self.page.locator("p-sidebar button, p-sidebar a").filter(has_text=patterns),
+            self.page.locator("button, a, span").filter(has_text=patterns),
+        ):
+            try:
+                count = await loc.count()
+                for i in range(min(count, 8)):
+                    el = loc.nth(i)
+                    if not await el.is_visible():
+                        continue
+                    text = ((await el.text_content()) or "").strip()
+                    cls = ((await el.get_attribute("class")) or "").lower()
+                    disabled = False
+                    try:
+                        disabled = await el.is_disabled()
+                    except Exception:
+                        disabled = "disable" in cls
+                    if disabled or "train_search" in cls:
+                        continue
+                    await el.scroll_into_view_if_needed()
+                    await el.click(force=True, timeout=5000)
+                    self._log(f"  → {label}: {text or 'payment action'}")
+                    return True
+            except Exception:
+                continue
+
+        clicked = await self.page.evaluate(
+            """
+            () => {
+                const visible = (el) => {
+                    if (!el) return false;
+                    const r = el.getBoundingClientRect();
+                    const s = getComputedStyle(el);
+                    return r.width > 2 && r.height > 2 && s.display !== 'none' && s.visibility !== 'hidden';
+                };
+                const actionRe = /^(Continue|Proceed|Pay\\s*&\\s*Book|Pay\\s+and\\s+Book|Make\\s+Payment|Pay|Submit)$/i;
+                const badRe = /train_Search|search/i;
+                const nodes = [...document.querySelectorAll('button, a, span')]
+                    .filter((el) => visible(el) && actionRe.test((el.innerText || el.textContent || '').trim()));
+                for (const el of nodes) {
+                    const cls = el.className || '';
+                    if (badRe.test(cls)) continue;
+                    if (el.disabled || /disable/i.test(cls)) continue;
+                    el.scrollIntoView({ block: 'center', inline: 'center' });
+                    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                    el.click();
+                    return (el.innerText || el.textContent || '').trim() || true;
+                }
+                return '';
+            }
+            """
+        )
+        if clicked:
+            self._log(f"  → {label}: {str(clicked)[:60]}")
+            return True
+        return False
 
     async def _dismiss_name_autocomplete(self) -> None:
         """Close name suggestion dropdown only — do not Escape the passenger sidebar."""
@@ -1327,6 +1632,13 @@ class IRCTCPlaywrightBot:
             return "passenger"
         return "unknown"
 
+    async def _raise_if_irctc_sorry_page(self, context: str) -> None:
+        if await self._detect_booking_phase() == "error":
+            raise IrctcSessionError(
+                "IRCTC 'Sorry!!! Please Try again!!' page appeared "
+                f"{context}. This booking session is invalid; restart from train search."
+            )
+
     async def _wait_booking_phase_transition(
         self, *, after: str, timeout: float = 20
     ) -> str:
@@ -1343,6 +1655,21 @@ class IRCTCPlaywrightBot:
                 return phase
             await asyncio.sleep(0.4)
         return await self._detect_booking_phase()
+
+    async def _wait_after_single_passenger_continue(self, timeout: float = 45) -> str:
+        """
+        After passenger Continue, do not click again. IRCTC may briefly show review
+        text while it transitions; wait for a terminal phase instead.
+        """
+        deadline = time.time() + timeout
+        last_phase = "unknown"
+        while time.time() < deadline:
+            phase = await self._detect_booking_phase()
+            last_phase = phase if phase != "unknown" else last_phase
+            if phase in ("payment", "captcha", "error"):
+                return phase
+            await asyncio.sleep(0.8)
+        return await self._detect_booking_phase() or last_phase
 
     async def _click_passenger_continue_js(self, *, pick: str = "first") -> bool:
         """
@@ -1434,9 +1761,9 @@ class IRCTCPlaywrightBot:
         deadline = time.time() + (45 if step == "passenger" else 15)
         last_err = ""
         clicks = 0
-        # IRCTC shows 'Sorry!!! Please Try again!!' if Continue is clicked twice,
-        # so click at most twice, with a long transition wait in between.
-        max_clicks = 2
+        # IRCTC often invalidates the transaction on repeated Continue clicks.
+        # One deliberate click is safer; if it does not transition, hand off.
+        max_clicks = 1
         while time.time() < deadline:
             phase = await self._detect_booking_phase()
             if phase == "error":
@@ -1482,6 +1809,14 @@ class IRCTCPlaywrightBot:
             clicks += 1
             await self._anik_pause(3, 2)
             if step != "passenger":
+                phase_after_click = await self._wait_booking_phase_transition(
+                    after="review_continue", timeout=12
+                )
+                if phase_after_click == "error":
+                    raise IrctcSessionError(
+                        "IRCTC 'Sorry!!! Please Try again!!' page appeared "
+                        f"after {step} Continue"
+                    )
                 return
 
             # Wait generously for the page to move before even considering a
@@ -1500,10 +1835,7 @@ class IRCTCPlaywrightBot:
                 )
             if new_phase in ("captcha", "review", "payment"):
                 return
-            self._log(
-                f"  → still on passenger form after Continue "
-                f"(click {clicks}/{max_clicks}) — waiting"
-            )
+            self._log("  → still on passenger form after one Continue — waiting")
             await asyncio.sleep(2)
 
         phase = await self._detect_booking_phase()
@@ -1609,10 +1941,12 @@ class IRCTCPlaywrightBot:
 
     async def _step_payment_handoff(self) -> None:
         self._log("📍 Step 6: Payment handoff (manual)")
+        await self._raise_if_irctc_sorry_page("before payment handoff")
         self._log("  ⚠ Payment is NOT automated — complete it in the browser")
         await self._ask_human(
             "Complete payment in Chrome. Type DONE when you see PNR / booking confirmation:"
         )
+        await self._raise_if_irctc_sorry_page("during payment handoff")
         self._log("✅ Booking flow finished")
 
     async def _keep_session_alive(self) -> None:
@@ -1713,12 +2047,43 @@ class IRCTCPlaywrightBot:
     # ─── DOM helpers ───────────────────────────────────────────────────────
 
     async def _dismiss_popup(self) -> None:
-        for selector in ('button:has-text("OK")', 'button:has-text("Accept")', 'text=OK'):
-            btn = self.page.locator(selector).first
-            if await btn.is_visible():
-                await btn.click()
-                await asyncio.sleep(0.5)
-                return
+        dialog = self.page.locator(
+            'p-dialog, [role="dialog"], .ui-dialog, .modal, .cdk-overlay-pane'
+        ).filter(
+            has_text=re.compile(
+                r"Alert|Welcome to IRCTC|preferred language|select your preferred language",
+                re.I,
+            )
+        )
+        if await dialog.count() > 0:
+            root = dialog.first
+            for label in ("English", "OK", "Accept", "Close"):
+                btn = root.get_by_role("button", name=re.compile(rf"^\s*{label}\s*$", re.I)).first
+                try:
+                    if await btn.is_visible():
+                        await btn.click(force=True)
+                        self._log(f"  → Closed IRCTC startup alert ({label})")
+                        await asyncio.sleep(0.8)
+                        return
+                except Exception:
+                    continue
+
+        for selector in (
+            'button:has-text("English")',
+            'button:has-text("OK")',
+            'button:has-text("Accept")',
+            'button[aria-label*="Close" i]',
+            'span:has-text("×")',
+            'text=OK',
+        ):
+            try:
+                btn = self.page.locator(selector).first
+                if await btn.is_visible():
+                    await btn.click(force=True)
+                    await asyncio.sleep(0.5)
+                    return
+            except Exception:
+                continue
 
     async def _open_login_modal(self) -> None:
         link = self.page.locator('a[aria-label="Click here to Login in application"]')
@@ -1960,6 +2325,24 @@ class IRCTCPlaywrightBot:
         preferred = self.config.preferred_train
         return bool(preferred and preferred in text)
 
+    async def _log_route_info_hint(self) -> None:
+        """Explain IRCTC's CNF route banner without treating it as the direct train row."""
+        if self._route_info_hint_logged:
+            return
+        try:
+            text = await self.page.inner_text("body", timeout=3000)
+        except Exception:
+            return
+
+        if not re.search(r"all\s+route\s+info|connecting\s+train|CNF\s+route|route\s+info", text, re.I):
+            return
+
+        self._route_info_hint_logged = True
+        self._log(
+            "ℹ️ IRCTC route-info banner detected: CNF route usually means a split/connecting "
+            "journey has confirmed seats, while the bot still books the selected direct train row."
+        )
+
     async def _fill_passenger_row(self, index: int, passenger: Passenger) -> None:
         self._log(f"  Passenger {index + 1}: {passenger.name}")
 
@@ -2119,10 +2502,13 @@ class IRCTCPlaywrightBot:
     async def _ask_human(self, question: str) -> str:
         self.status = "waiting"
         self._log(f"HUMAN INPUT NEEDED: {question}")
-        if self.human_callback:
-            return self.human_callback(question)
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, lambda: input(f"\n{question}\n> ").strip())
+        try:
+            if self.human_callback:
+                return self.human_callback(question)
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, lambda: input(f"\n{question}\n> ").strip())
+        finally:
+            self.status = "running"
 
     def _log(self, msg: str) -> None:
         line = f"[{time.strftime('%H:%M:%S')}] {msg}"

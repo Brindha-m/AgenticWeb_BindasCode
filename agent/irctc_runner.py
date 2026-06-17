@@ -92,6 +92,8 @@ def sync_ui(state: Any) -> None:
                         state.irctc_human_q = "[SEARCH_DONE]"
                     elif "[CONFIRM_DONE]" in q:
                         state.irctc_human_q = "[CONFIRM_DONE]"
+                    elif "[AADHAAR_DONE]" in q:
+                        state.irctc_human_q = "[AADHAAR_DONE]"
                     elif "[DATE_CARD]" in q:
                         state.irctc_human_q = "[DATE_CARD]"
                     else:
@@ -135,6 +137,7 @@ async def _run_playwright_booking(config: dict) -> None:
         to_name=config.get("dest_name", env_cfg.to_name),
         journey_date=config.get("date", env_cfg.journey_date),
         train_class=config.get("train_class", env_cfg.train_class),
+        journey_quota=config.get("journey_quota", env_cfg.journey_quota),
         preferred_train=config.get("preferred_train", env_cfg.preferred_train),
         mobile=env_cfg.mobile,
         payment_method=env_cfg.payment_method,
@@ -196,6 +199,12 @@ async def _run_playwright_booking(config: dict) -> None:
             await bot.close()
         else:
             bot._log("ℹ️ Chrome left open — close the browser window when finished.")
+            if bot.status == "failed" and pw_cfg.keep_alive_seconds > 0:
+                bot._log(
+                    f"ℹ️ Keeping failed browser session visible for "
+                    f"{pw_cfg.keep_alive_seconds}s"
+                )
+                await asyncio.sleep(pw_cfg.keep_alive_seconds)
         _active_agent = None
 
 
