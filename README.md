@@ -1,5 +1,3 @@
-> ##### **Team Bindas Code** | Microsoft Hackathon Submission
-
 ## Made It — AI Agentic Browser Automation
 
 > **From IRCTC and Tirupati to FASTag, dedicated agents for the services that matter the most. 🚀**
@@ -151,10 +149,6 @@ Recommended to run in local.
 | **Streamlit Cloud** | UI only — Playwright cannot launch Chrome in cloud sandbox |
 
 
-**Judge access:** No app login required. Use **Scripted mode** on any service page. OTP/CAPTCHA appear in the yellow human-input panel when automating real portals locally.
-
-
-
 ---
 
 ## Project structure
@@ -178,25 +172,12 @@ made-it/
 ├── scripts/               # CLI smoke tests
 └── docs/                  # Project deck PDF
 ```
-
----
-
-## Team — Bindas Code
-
-| Name | Role |
-|------|------|
-| **Brindha Manickavasakan** | Team Lead 
-
 ---
 
 ## License
 
 MIT — see repository for details.
 
-**Project deck:** `docs/BindasCode_AgenticWeb_ProjectDeck.pdf`
 
 ---
 
-> #### "The day AI reliably books your IRCTC ticket.. is the day we can finally say —  AI has made it." And This is Made It.
-
-#### "Thank you."
